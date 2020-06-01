@@ -1,33 +1,51 @@
 include:
   - project: 'cidevops/cidevops-gitlabci-service'
-    ref: master
+    ref: develop
     file: 'jobs/build.yml'
   - project: 'cidevops/cidevops-gitlabci-service'
-    ref: master
+    ref: develop
     file: 'jobs/test.yml'
   - project: 'cidevops/cidevops-gitlabci-service'
-    ref: master
+    ref: develop
     file: 'jobs/codeanalysis.yml'
   - project: 'cidevops/cidevops-gitlabci-service'
-    ref: master
+    ref: develop
     file: 'jobs/deploy.yml'
+  - project: 'cidevops/cidevops-gitlabci-service'
+    ref: develop
+    file: 'jobs/artifactory.yml'
+  
 
 variables:
-  GIT_CLONE_PATH: $CI_BUILDS_DIR/builds/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME/$CI_PIPELINE_ID
+  ## 全局配置
+  GIT_CLONE_PATH: $CI_BUILDS_DIR/builds/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME/$CI_PIPELINE_ID    
   GIT_CHECKOUT: "false"
-  MVN_OPTS: "-Dmaven.repo.local=/home/gitlab-runner/m2"
-  BUILD_SHELL: 'mvn clean package  -DskipTests -Dmaven.repo.local=/home/gitlab-runner/ci-build-cache/maven  --settings=./settings.xml'  ##构建命令
-  TEST_SHELL : 'mvn test -Dmaven.repo.local=/home/gitlab-runner/ci-build-cache/maven  --settings=./settings.xml'                        ##测试命令
+
+  ## 依赖容器镜像
+  BUILD_IMAGE: "maven:3.6.3-jdk-8"
+  SONAR_IMAGE: "sonarsource/sonar-scanner-cli:latest"
+  
+  
+  ## 构建测试参数
+  MAVEN_OPTS: "-Dmaven.repo.local=/home/gitlab-runner/ci-build-cache/maven "
+  BUILD_SHELL: 'mvn clean package  -DskipTests  --settings=./settings.xml '  ##构建命令
+  TEST_SHELL : 'mvn test  --settings=./settings.xml '                        ##测试命令
   JUNIT_REPORT_PATH: 'target/surefire-reports/TEST-*.xml'   ##单元测试报告
   
-  # 代码扫描
-  SCANNER_HOME : ""
-  SCAN_DIR : "src"
-  ARTIFACT_PATH : 'target/*.jar'                            ##制品目录
+  ## 代码扫描
+  SONAR_PROJECT_LANG: "JAVA"
+  SONAR_SOURCE_DIR : "src" 
+  SONAR_SERVER_URL: "http://192.168.1.200:30090" 
+  SONAR_SERVER_LOGIN: "ee2bcb37deeb6dfe3a07fe08fb529559b00c1b7b" 
+  SONAR_SCAN_ARGS: "-Dsonar.sources=${SONAR_SOURCE_DIR} 
+                   -Dsonar.java.binaries=target/classes 
+                   -Dsonar.java.test.binaries=target/test-classes 
+                   -Dsonar.java.surefire.report=target/surefire-reports "
 
   #上传制品库
   ARTIFACTORY_URL: "http://192.168.1.200:30082/artifactory"
   ARTIFACTORY_NAME: "cidevops"
+  ARTIFACT_PATH: "target/*.jar"
   TARGET_FILE_PATH: "$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME/$CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA-$CI_PIPELINE_ID"
   TARGET_ARTIFACT_NAME: "$CI_PROJECT_NAME-$CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA-$CI_PIPELINE_ID.jar"
 
@@ -38,122 +56,93 @@ variables:
   IMAGE_NAME: "$CI_REGISTRY/$CI_PROJECT_PATH:$CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA-$CI_PIPELINE_ID"
   DOCKER_FILE_PATH: "./Dockerfile"
 
-  #部署k8s
+  #部署应用k8s
   RUN_DEPLOY: "yes"
   APP_NAME: "$CI_PROJECT_NAME"
   CONTAINER_PORT: 8081
-  NODE_PORT: 30185
-  ENV_NAME: "staging"
-  ENV_URL: "http://192.168.1.200:30185"
+  #NODE_PORT: 30185
   NAMESPACE: "$CI_PROJECT_NAME-$CI_PROJECT_ID-$CI_ENVIRONMENT_SLUG"
-  
-  
-  
-image: docker:latest
 
-    
+## 流水线创建控制
+#workflow:
+#  rules:
+#    - if: "$CI_PIPELINE_SOURCE == 'merge_request_event'"
+#    - if: $CI_COMMIT_TAG
+#    - if: $CI_COMMIT_BRANCH == "master"
+
+## 运行阶段  
 stages:
   - build
   - test
   - parallel01
-  - down_artifact
   - deploy
-  - interface_test
+  - deploy_after
+  - rollout
 
+cache:
+  paths:
+    - target/
+
+## DEBUG 
 before_script:
   - ls /home/gitlab-runner/ci-build-cache/builds/
   - echo  $CI_BUILDS_DIR
   - echo  $KUBE_URL $KUBE_TOKEN $KUBE_CA_PEM $KUBE_CA_PEM_FILE
   - export
+  - echo $ENV_NAME $CI_ENVIRONMENT_SLUG
 
 
+################# Jobs Configure #####################
+## 构建作业
 build:
   variables:
     GIT_CHECKOUT: "true"
-  tags:
-    - k8s
-  image: maven:3.6.3-jdk-8
-  stage: build
+  image: ${BUILD_IMAGE}
   extends: .build
-  rules:
-    - when: on_success
-  after_script:
-    - ls target/
-
+  
+## 测试作业
 test:
-  before_script:
-    - ls target/
-  tags:
-    - k8s
-  image: maven:3.6.3-jdk-8
-  stage: test
+  image: ${BUILD_IMAGE}
   extends: .test
-  rules:
-    - when: on_success
-  after_script:
+  before_script:
+    - ls 
     - ls target/
 
+  
+## 代码扫描
 code_analysis:
-  tags:
-    - k8s
-  image: sonarsource/sonar-scanner-cli:latest
   stage: parallel01
-  script:
-    - ls target/
-    - echo $CI_MERGE_REQUEST_IID $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME  $CI_MERGE_REQUEST_TARGET_BRANCH_NAME
-    - "sonar-scanner -Dsonar.projectKey=${CI_PROJECT_NAME} \
-                  -Dsonar.projectName=${CI_PROJECT_NAME} \
-                  -Dsonar.projectVersion=${CI_COMMIT_REF_NAME} \
-                  -Dsonar.ws.timeout=30 \
-                  -Dsonar.projectDescription=${CI_PROJECT_TITLE} \
-                  -Dsonar.links.homepage=${CI_PROJECT_URL} \
-                  -Dsonar.sources=${SCAN_DIR} \
-                  -Dsonar.sourceEncoding=UTF-8 \
-                  -Dsonar.java.binaries=target/classes \
-                  -Dsonar.java.test.binaries=target/test-classes \
-                  -Dsonar.java.surefire.report=target/surefire-reports \
-                  -Dsonar.host.url=http://192.168.1.200:30090 \
-                  -Dsonar.login=ee2bcb37deeb6dfe3a07fe08fb529559b00c1b7b \
-                  -Dsonar.branch.name=${CI_COMMIT_REF_NAME}" 
-                  
+  image: ${SONAR_IMAGE}
+  extends: .code_analysis
+
+### 获取构建结果
+#get_analysis_result:
+#  image: curlimages/curl:7.70.0
+#  extends: .get_analysis_result
+
+
+## 构建镜像
 build_image:
-  before_script:
-    - ls target/
-  tags:
-    - k8s
   image: docker:latest
   services:
     - name: docker:dind
   stage: parallel01
   extends: .build-docker
 
+## 上传制品
+deploy_artifact:
+  image: curlimages/curl:7.70.0
+  stage: parallel01
+  extends: .deploy-artifact
 
+## 发布应用
 deploy_k8s:
   image: lucj/kubectl:1.17.2
-  tags:
-    - k8s
-    - kubernetes-runner
-  stage: deploy
-  script:
-    - kubectl config set-cluster my-cluster --server=${KUBE_URL} --certificate-authority="${KUBE_CA_PEM_FILE}"
-    - kubectl config set-credentials admin --token=${KUBE_TOKEN}
-    - sed -i "s#__namespace__#${NAMESPACE}#g" deployment.yaml 
-    - sed -i "s#__appname__#${APP_NAME}#g" deployment.yaml 
-    - sed -i "s#__containerport__#${CONTAINER_PORT}#g" deployment.yaml 
-    - sed -i "s#__nodeport__#${NODE_PORT}#g" deployment.yaml 
-    - sed -i "s#__imagename__#${IMAGE_NAME}#g" deployment.yaml 
-    - sed -i "s#__CI_ENVIRONMENT_SLUG__#${CI_ENVIRONMENT_SLUG}#g" deployment.yaml 
-    - sed -i "s#__CI_PROJECT_PATH_SLUG__#${CI_PROJECT_PATH_SLUG}#g" deployment.yaml
-    - cat deployment.yaml
-    - kubectl apply -f deployment.yaml  
-  environment:
-    name: $ENV_NAME
-    url: $ENV_URL
+  extends: .deploy_k8s
+    
+## 应用回滚
+rollout_k8s:
+  image: lucj/kubectl:1.17.2
+  extends: .rollout_k8s
 
   
-interfact_test:
-  inherit:
-    variables: false
-  stage: interface_test
-  extends: .interfacetest
-

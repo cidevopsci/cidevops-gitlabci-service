@@ -1,11 +1,13 @@
+## build相关作业
+##
+
 .build:
   stage: build
-  tags:
-    - build
   script: 
-    - $BUILD_SHELL
-    - ls
+    - ${BUILD_SHELL}
+
     
+
 .build-docker:
   stage: buildimage
   script:
